@@ -93,6 +93,17 @@ export default function CourtRoomPage() {
         <h2>Court Room</h2>
         <p>This page is under construction.</p>
       </div>
+      {/* Lady Justice emblem on the wall */}
+      <div style={{ position: 'absolute', right: '8%', top: '14%', zIndex: 10 }}>
+        <Image
+          src="/lady-justice.jpg"
+          alt="Lady Justice emblem"
+          width={120}
+          height={120}
+          style={{ borderRadius: '50%' }}
+          priority
+        />
+      </div>
     </main>
   );
 }
