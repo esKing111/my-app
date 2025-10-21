@@ -16,6 +16,9 @@ COPY . .
 # Build the Next.js application
 RUN npm run build
 
+# Verify the `.next` directory exists
+RUN test -d .next || (echo "Build failed: .next directory not found" && exit 1)
+
 # Expose the port the app runs on
 EXPOSE 3000
 
