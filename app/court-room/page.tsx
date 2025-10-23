@@ -1,9 +1,13 @@
 "use client";
 
 import Image from 'next/image';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { useSearchParams } from 'next/navigation';
 
 export default function CourtRoomPage() {
+  const searchParams = useSearchParams();
+  const testMode = searchParams.get('test') === '1' || process.env.NEXT_PUBLIC_TEST_MODE === '1';
+
   // Timer state (seconds)
   const [seconds, setSeconds] = useState(0);
 
@@ -23,73 +27,285 @@ export default function CourtRoomPage() {
   const minAngle = min * 6 + sec * 0.1;
   const hourAngle = hour * 30 + min * 0.5;
 
-  // Define game state and stages
-  const gameStages = [
-    {
-      id: 1,
-      name: "Boss Tasks",
-      messages: [
-        "Complete sprint 1",
-        "Fix the title color to red",
-        "Update alt text in image 1",
-      ],
-    },
-    {
-      id: 2,
-      name: "Family Requests",
-      messages: [
-        "Pick up the kids after work",
-        "Help with dinner",
-      ],
-    },
-    {
-      id: 3,
-      name: "Friends Messages",
-      messages: [
-        "Join us for a movie",
-        "Can you lend me your car?",
-      ],
-    },
-  ];
+  // Categories and messages (Boss, Family, Agile)
+  type Category = 'Boss' | 'Family' | 'Agile';
 
-  // Define penalties for denying tasks
-  const penalties = {
-    boss: "Courtroom appearance for breaking company policy",
-    family: "Courtroom appearance for neglecting family duties",
-    friends: "Courtroom appearance for breaking social commitments",
+  const catalog: Record<Category, string[]> = {
+    Boss: [
+      'Are you done with sprint 1?',
+      'Status on the release notes?',
+      'Fix the title colour to Red',
+    ],
+    Family: [
+      'Can you pick up the kids after work?',
+      'Don\'t forget to call your mother',
+    ],
+    Agile: [
+      'Fix alt in img1',
+      'Fix input validation',
+      'Refactor the login form spacing',
+      'Fix User login',
+      'Fix Secure Database',
+    ],
   };
 
-  // Define message type
+  // Message model with escalation support
+  type MessageStatus = 'normal' | 'urgent' | 'resolved' | 'fined' | 'denied';
   interface Message {
-    stage: string;
-    message: string;
+    id: number;
+    category: Category;
+    text: string;
+    status: MessageStatus;
+    createdAt: number; // epoch ms
+    // Escalation metadata for special items
+    escalatable?: boolean;
+    lawBroken?: string; // e.g., 'Disability Act' or 'Laws of Tort'
+    reason?: string; // human readable reason shown in court overlay
   }
 
-  // Initialize state with correct type
-  const [currentMessages, setCurrentMessages] = useState<Message[]>([]);
+  const [messages, setMessages] = useState<Message[]>([]);
+  const idCounter = useRef(1);
 
+  // Track timers per message to upgrade to urgent and to show court overlay
+  const timersRef = useRef<
+    Map<number, { toUrgent?: number; toCourt?: number }>
+  >(new Map());
+
+  // Court overlay state
+  const [courtVisible, setCourtVisible] = useState(false);
+  const [courtInfo, setCourtInfo] = useState<{ law: string; reason: string } | null>(null);
+
+  // Helpers to persist to API
+  const apiCreateMessage = async (payload: Omit<Message, 'id' | 'createdAt'> & { createdAt?: number }) => {
+    try {
+      const res = await fetch('/api/messages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          category: payload.category,
+          text: payload.text,
+          status: payload.status,
+          escalatable: payload.escalatable ?? false,
+          lawBroken: payload.lawBroken ?? null,
+          reason: payload.reason ?? null,
+        }),
+      });
+      if (!res.ok) throw new Error('Failed to create message');
+      const created = await res.json();
+      return created as { id: number; createdAt: string };
+    } catch {
+      return null;
+    }
+  };
+
+  const apiUpdateMessage = async (id: number, data: Partial<{ text: string; status: MessageStatus }>) => {
+    try {
+      await fetch(`/api/messages/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data),
+      });
+    } catch {
+      // noop
+    }
+  };
+
+  const apiLoadMessages = async (): Promise<Message[]> => {
+    try {
+      const res = await fetch('/api/messages');
+      if (!res.ok) return [];
+      const list = (await res.json()) as Array<{ id: number; category: Category; text: string; status: MessageStatus; escalatable?: boolean; lawBroken?: string | null; reason?: string | null; createdAt: string }>
+      // Show only active (not resolved) in inbox
+      return list
+        .filter((m) => m.status !== 'resolved' && m.status !== 'fined')
+        .map((m) => {
+          // Fallback: infer law/reason from text if missing
+          let lawBroken = m.lawBroken || undefined;
+          let reason = m.reason || undefined;
+          const lower = m.text.toLowerCase();
+          if (!lawBroken) {
+            if (lower.includes('fix alt')) {
+              lawBroken = 'Disability Act';
+              reason = 'Missing alt text impacts accessibility';
+            } else if (lower.includes('input validation')) {
+              lawBroken = 'Laws of Tort';
+              reason = 'Known input validation flaw led to breach';
+            } else if (lower.includes('user login')) {
+              lawBroken = 'Bankruptcy Court';
+              reason = 'Declared bankruptcy: critical login broken — no users, no revenue';
+            } else if (lower.includes('secure database')) {
+              lawBroken = 'Laws of Tort';
+              reason = 'You got hacked: insecure database led to damages';
+            }
+          }
+
+          return {
+            id: m.id,
+            category: m.category,
+            text: m.text,
+            status: m.status,
+            createdAt: new Date(m.createdAt).getTime(),
+            escalatable: m.escalatable,
+            lawBroken,
+            reason,
+          } as Message;
+        });
+    } catch {
+      return [];
+    }
+  };
+
+  // Timings (shorter in test mode)
+  const URGENT_DELAY_MS = testMode ? 2000 : 2 * 60 * 1000;
+  const COURT_DELAY_MS = testMode ? 4000 : 4 * 60 * 1000;
+  const ARRIVAL_BASE_MS = testMode ? 400 : 20000;
+  const ARRIVAL_RANDOM_MS = testMode ? 400 : 10000;
+
+  // Utility: schedule escalating timeouts for a message
+  const scheduleEscalation = (msg: Message) => {
+    if (!msg.escalatable) return;
+    // After 2 minutes -> urgent
+    const urgentId = window.setTimeout(() => {
+      // persist escalation
+      void apiUpdateMessage(msg.id, { status: 'urgent', text: `URGENT: ${msg.text}` });
+      setMessages((prev) => {
+        const exists = prev.some((m) => m.id === msg.id);
+        if (exists) {
+          return prev.map((m) => (m.id === msg.id ? { ...m, status: 'urgent', text: `URGENT: ${m.text}` } : m));
+        }
+        // Re-introduce as urgent if user ignored/dismissed it
+        return [
+          ...prev,
+          { ...msg, status: 'urgent', text: `URGENT: ${msg.text}` },
+        ];
+      });
+    }, URGENT_DELAY_MS);
+
+    // After 4 minutes -> court overlay
+    const courtId = window.setTimeout(() => {
+      // mark as fined in DB
+      void apiUpdateMessage(msg.id, { status: 'fined' });
+      setCourtInfo({
+        law: msg.lawBroken || 'General Negligence',
+        reason: msg.reason || 'Ignoring repeated critical issues',
+      });
+      setCourtVisible(true);
+    }, COURT_DELAY_MS);
+
+    timersRef.current.set(msg.id, { toUrgent: urgentId, toCourt: courtId });
+  };
+
+  // Clear timers for a message
+  const clearTimers = (id: number) => {
+    const t = timersRef.current.get(id);
+    if (t?.toUrgent) window.clearTimeout(t.toUrgent);
+    if (t?.toCourt) window.clearTimeout(t.toCourt);
+    timersRef.current.delete(id);
+  };
+
+  // Load existing messages on mount
   useEffect(() => {
-    const messageInterval = setInterval(() => {
-      const stage = gameStages[Math.floor(Math.random() * gameStages.length)];
-      const message = stage.messages[Math.floor(Math.random() * stage.messages.length)];
-      setCurrentMessages((prev) => [...prev, { stage: stage.name, message }]);
-    }, 20000);
-
-    return () => clearInterval(messageInterval);
+    let mounted = true;
+    (async () => {
+      const existing = await apiLoadMessages();
+      if (!mounted) return;
+      setMessages(existing);
+      // Re-arm escalations for active escalatable items
+      existing.forEach((m) => {
+        if (m.escalatable && m.status !== 'fined' && m.status !== 'resolved') {
+          scheduleEscalation(m);
+        }
+      });
+    })();
+    return () => {
+      mounted = false;
+    };
   }, []);
 
-  // Handle user actions and penalties
-  const handleAction = (action: 'accept' | 'deny', message: Message) => {
-    const stageKey = message.stage.toLowerCase() as keyof typeof penalties;
-    if (action === 'deny') {
-      alert(`Penalty: ${penalties[stageKey]}`);
-      // Trigger court scene logic here
-    } else {
-      alert(`Task accepted: ${message.message}`);
-    }
+  // Schedule incoming messages every X ms (shorter in test mode)
+  useEffect(() => {
+    let alive = true;
+    const scheduleNext = () => {
+      if (!alive) return;
+      const delay = ARRIVAL_BASE_MS + Math.floor(Math.random() * ARRIVAL_RANDOM_MS);
+      const t = window.setTimeout(() => {
+        // pick a random category
+        const categories: Category[] = ['Boss', 'Family', 'Agile'];
+        const category = categories[Math.floor(Math.random() * categories.length)];
+        const texts = catalog[category];
+        const text = texts[Math.floor(Math.random() * texts.length)];
 
-    // Remove the message from the queue
-    setCurrentMessages((prev) => prev.filter((m) => m !== message));
+  const id = idCounter.current++;
+        // Detect special, escalatable items
+        let escalatable = false;
+        let lawBroken: string | undefined;
+        let reason: string | undefined;
+        if (text.toLowerCase().includes('fix alt')) {
+          escalatable = true;
+          lawBroken = 'Disability Act';
+          reason = 'Missing alt text impacts accessibility';
+        } else if (text.toLowerCase().includes('input validation')) {
+          escalatable = true;
+          lawBroken = 'Laws of Tort';
+          reason = 'Known input validation flaw led to breach';
+        } else if (text.toLowerCase().includes('user login')) {
+          escalatable = true;
+          lawBroken = 'Bankruptcy Court';
+          reason = 'Declared bankruptcy: critical login broken — no users, no revenue';
+        } else if (text.toLowerCase().includes('secure database')) {
+          escalatable = true;
+          lawBroken = 'Laws of Tort';
+          reason = 'You got hacked: insecure database led to damages';
+        }
+
+        const msg: Message = {
+          id,
+          category,
+          text,
+          status: 'normal',
+          createdAt: Date.now(),
+          escalatable,
+          lawBroken,
+          reason,
+        };
+
+        // Persist then use DB id if available
+        apiCreateMessage(msg).then((created) => {
+          const finalMsg: Message = {
+            ...msg,
+            id: created?.id ?? msg.id,
+          };
+          setMessages((prev) => [...prev, finalMsg]);
+          scheduleEscalation(finalMsg);
+        });
+
+        scheduleNext(); // chain next message
+      }, delay);
+      // store the scheduler id on a special key - not strictly needed beyond cleanup
+      timersRef.current.set(-1, { toCourt: t });
+    };
+    scheduleNext();
+    return () => {
+      alive = false;
+      // cleanup any pending scheduler timeout
+      const sched = timersRef.current.get(-1)?.toCourt;
+      if (sched) window.clearTimeout(sched);
+    };
+  }, []);
+
+  // Resolve or ignore actions
+  const handleAction = (action: 'accept' | 'ignore', message: Message) => {
+    if (action === 'accept') {
+      // resolve: remove and clear timers
+      clearTimers(message.id);
+      void apiUpdateMessage(message.id, { status: 'resolved' });
+      setMessages((prev) => prev.filter((m) => m.id !== message.id));
+    } else {
+      // ignore: remove now, but timers will still re-add urgency/courtroom via scheduleEscalation
+      // To simulate "it comes back in 2 min as urgent", we keep the timers running and drop the message from inbox for now
+      void apiUpdateMessage(message.id, { status: 'denied' });
+      setMessages((prev) => prev.filter((m) => m.id !== message.id));
+    }
   };
 
   // Integrate game logic with courtroom page
@@ -161,13 +377,63 @@ export default function CourtRoomPage() {
         />
       </div>
 
+      {/* Court overlay */}
+      {courtVisible && courtInfo && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          style={{
+            position: 'absolute',
+            inset: 0,
+            background: 'rgba(0,0,0,0.55)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 50,
+          }}
+        >
+          <div
+            style={{
+              background: 'white',
+              padding: '1.25rem 1.5rem',
+              borderRadius: 8,
+              width: 'min(520px, 92vw)',
+              boxShadow: '0 12px 28px rgba(0,0,0,0.35)',
+              textAlign: 'center',
+            }}
+          >
+            <h2 style={{ margin: '0 0 0.5rem' }}>Courtroom Ruling</h2>
+            <p style={{ margin: '0.25rem 0' }}>
+              Law broken: <strong>{courtInfo.law}</strong>
+            </p>
+            <p style={{ margin: '0.25rem 0 1rem' }}>{courtInfo.reason}</p>
+            <button
+              onClick={() => {
+                setCourtVisible(false);
+                setCourtInfo(null);
+              }}
+              style={{
+                padding: '0.5rem 1rem',
+                backgroundColor: '#7a5c2e',
+                color: '#fff',
+                border: 'none',
+                borderRadius: 6,
+                cursor: 'pointer',
+              }}
+            >
+              Acknowledge
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Inbox UI */}
       <div
         style={{
           position: 'absolute',
           bottom: '10%',
-          left: '5%',
-          width: '90%',
+          left: '15%',
+          width: '70%',
           height: '30%',
           backgroundColor: 'rgba(255, 255, 255, 0.9)',
           borderRadius: '8px',
@@ -177,24 +443,32 @@ export default function CourtRoomPage() {
         }}
       >
         <h3 style={{ marginBottom: '1rem' }}>Inbox</h3>
-        {currentMessages.map((message, index) => (
+        {messages.map((message) => (
           <div
-            key={index}
+            key={message.id}
+            data-testid="inbox-row"
+            data-message-id={message.id}
             style={{
               display: 'flex',
               justifyContent: 'space-between',
               alignItems: 'center',
               marginBottom: '0.5rem',
               padding: '0.5rem',
-              backgroundColor: '#f9f9f9',
+              backgroundColor: message.status === 'urgent' ? '#ffe9e9' : '#f9f9f9',
               borderRadius: '4px',
               boxShadow: '0 2px 4px rgba(0, 0, 0, 0.1)',
             }}
           >
-            <span>{message.message}</span>
+            <div>
+              <span style={{ fontWeight: 600 }}>[{message.category}] </span>
+              <span style={{ color: message.status === 'urgent' ? '#b00020' : '#222' }}>
+                {message.text}
+              </span>
+            </div>
             <div>
               <button
                 onClick={() => handleAction('accept', message)}
+                data-testid="do-it"
                 style={{
                   marginRight: '0.5rem',
                   padding: '0.5rem 1rem',
@@ -205,10 +479,11 @@ export default function CourtRoomPage() {
                   cursor: 'pointer',
                 }}
               >
-                Accept
+                Do it
               </button>
               <button
-                onClick={() => handleAction('deny', message)}
+                onClick={() => handleAction('ignore', message)}
+                data-testid="deny-it"
                 style={{
                   padding: '0.5rem 1rem',
                   backgroundColor: '#f44336',
@@ -218,7 +493,7 @@ export default function CourtRoomPage() {
                   cursor: 'pointer',
                 }}
               >
-                Deny
+                Deny it
               </button>
             </div>
           </div>

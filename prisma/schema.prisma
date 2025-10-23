@@ -1,0 +1,22 @@
+// Prisma schema for SQLite database
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Message {
+  id          Int      @id @default(autoincrement())
+  category    String
+  text        String
+  status      String   @default("normal")
+  escalatable Boolean  @default(false)
+  lawBroken   String?
+  reason      String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
